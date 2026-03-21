@@ -251,6 +251,13 @@ def sync_workspace_templates(workspace: Path, silent: bool = False) -> list[str]
     _write(None, workspace / "memory" / "HISTORY.md")
     (workspace / "skills").mkdir(exist_ok=True)
 
+    # Sync webhook instruction templates
+    webhooks_tpl = tpl / "webhooks"
+    if webhooks_tpl.is_dir():
+        for item in webhooks_tpl.iterdir():
+            if item.name.endswith(".md") and not item.name.startswith("."):
+                _write(item, workspace / "webhooks" / item.name)
+
     if added and not silent:
         from rich.console import Console
         for name in added:
