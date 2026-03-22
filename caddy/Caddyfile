@@ -1,0 +1,13 @@
+hashi.offwww.com {
+	handle /webhook/* {
+		@notgithub not remote_ip 192.30.252.0/22 185.199.108.0/22 140.82.112.0/20 143.55.64.0/20
+		respond @notgithub 403
+
+		reverse_proxy nanobot-1:18790
+	}
+
+	handle {
+		root * /srv
+		file_server
+	}
+}
