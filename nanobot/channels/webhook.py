@@ -86,6 +86,7 @@ class WebhookSourceConfig(Base):
     ignore_repos: list[str] = Field(default_factory=list)
     ignore_branches: list[str] = Field(default_factory=list)
     ignore_labels: list[str] = Field(default_factory=list)
+    require_assignee: str = ""
     notify_channel: str = ""
     notify_chat_id: str = ""
 
@@ -299,6 +300,13 @@ class WebhookChannel(BaseChannel):
                 logger.debug("Webhook filtered: labels {} in ignoreLabels", labels)
                 return False
 
+        # Assignee filter
+        if cfg.require_assignee:
+            assignees = self._extract_assignees(payload)
+            if assignees is not None and cfg.require_assignee not in assignees:
+                logger.debug("Webhook filtered: '{}' not in assignees {}", cfg.require_assignee, assignees)
+                return False
+
         return True
 
     @staticmethod
@@ -343,6 +351,28 @@ class WebhookChannel(BaseChannel):
                 if name:
                     labels.add(name)
         return labels
+
+    @staticmethod
+    def _extract_assignees(payload: dict) -> set[str] | None:
+        """Extract assignee logins from GitHub issue/PR payloads.
+
+        Returns None for event types that don't have assignees (e.g. push),
+        so the filter is only applied when assignee info is present.
+        """
+        for key in ("pull_request", "issue"):
+            obj = payload.get(key)
+            if obj is None:
+                continue
+            assignees: set[str] = set()
+            for a in obj.get("assignees", []):
+                login = a.get("login") if isinstance(a, dict) else str(a)
+                if login:
+                    assignees.add(login)
+            assignee = obj.get("assignee")
+            if isinstance(assignee, dict) and assignee.get("login"):
+                assignees.add(assignee["login"])
+            return assignees
+        return None
 
     # ------------------------------------------------------------------
     # Context building
