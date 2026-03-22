@@ -24,8 +24,11 @@ gh api graphql -f query='query($id:ID!){node(id:$id){...on ProjectV2Item{content
 |--------|----------|
 | Ready for Planning | → **ready-for-planning** |
 | In Planning | → **in-planning** |
+| Plan Review | → **plan-review** |
+| Ready for Dev | → **ready-for-dev** |
+| In Development | → **in-development** |
 
-All other statuses (Hold, Backlog, UI Prototyping, Plan Review, Ready for Dev, In Development, Review, Done): respond `"[#{NUMBER}](https://github.com/0ZComputing/hashi/issues/{NUMBER}) - noop"` — NO tool calls.
+All other statuses (Hold, Backlog, UI Prototyping, Review, Done): respond `"[#{NUMBER}](https://github.com/0ZComputing/hashi/issues/{NUMBER}) - noop"` — NO tool calls.
 
 ---
 
@@ -97,6 +100,68 @@ su -c 'source /home/claude/.env && cd /root/hashi-worktrees/issue-{NUMBER} && no
 ```
 
 **3.** Respond: `"[#{NUMBER}](https://github.com/0ZComputing/hashi/issues/{NUMBER}) - planning started"`
+
+---
+
+## plan-review
+
+Assign reviewers.
+
+**1.** Assign team 01Z for review:
+```bash
+gh issue edit {NUMBER} --repo 0ZComputing/hashi --remove-assignee sledcycle --add-assignee 01Z 2>/dev/null || echo "assigned"
+```
+
+**2.** Respond: `"[#{NUMBER}](https://github.com/0ZComputing/hashi/issues/{NUMBER}) - plan review, assigned 01Z"`
+
+---
+
+## ready-for-dev
+
+Setup for implementation, then advance to In Development.
+
+**1.** Check not already tracked:
+```bash
+cat /root/.nanobot/workspace/active-tasks.json
+```
+If issue_number exists with status `in_development` → `"[#{NUMBER}](https://github.com/0ZComputing/hashi/issues/{NUMBER}) - noop already tracked"`
+
+**2.** Register in active-tasks.json (or update existing entry):
+```bash
+cat /root/.nanobot/workspace/active-tasks.json | jq --argjson n {NUMBER} --arg t "{TITLE}" '[.[] | select(.issue_number != $n)] + [{issue_number:$n,issue_title:$t,repo:"0ZComputing/hashi",branch:"ai/issue-\($n)",worktree:"/root/hashi-worktrees/issue-\($n)",status:"in_development",spawned_at:now|todate}]' > /tmp/at.json && mv /tmp/at.json /root/.nanobot/workspace/active-tasks.json
+```
+
+**3.** Move status → In Development:
+```bash
+gh api graphql -f query='mutation{updateProjectV2ItemFieldValue(input:{projectId:"PVT_kwDODgSGac4BPTGn",itemId:"ITEM_ID",fieldId:"PVTSSF_lADODgSGac4BPTGnzg9vz6Y",value:{singleSelectOptionId:"47fc9ee4"}}){projectV2Item{id}}}'
+```
+
+**4.** Respond: `"[#{NUMBER}](https://github.com/0ZComputing/hashi/issues/{NUMBER}) - ready for dev, moved to In Development"`
+
+---
+
+## in-development
+
+Fire Claude CLI one-shot to implement.
+
+**1.** Render implementation prompt:
+```bash
+sed "s#{N}#{NUMBER}#g" /root/prompts/impl-agent.md | sed "s#{TITLE}#ESCAPED_TITLE#g" > /tmp/claude-impl-{NUMBER}.md
+```
+
+**2.** Spawn Claude CLI. If labels contain "UI" or title/body has ui/frontend/component/layout/design/css/style → use Figma MCP.
+
+Non-UI:
+```bash
+su -c 'source /home/claude/.env && cd /root/hashi-worktrees/issue-{NUMBER} && nohup claude -p --dangerously-skip-permissions --model opus < /tmp/claude-impl-{NUMBER}.md > /tmp/claude-impl-{NUMBER}.out 2>&1 &' claude
+```
+
+UI:
+```bash
+su -c 'source /home/claude/.env && cd /root/hashi-worktrees/issue-{NUMBER} && nohup claude -p --dangerously-skip-permissions --model opus --mcp-config /root/figma-mcp.json < /tmp/claude-impl-{NUMBER}.md > /tmp/claude-impl-{NUMBER}.out 2>&1 &' claude
+```
+
+**3.** Respond: `"[#{NUMBER}](https://github.com/0ZComputing/hashi/issues/{NUMBER}) - implementation started"`
 
 ---
 
