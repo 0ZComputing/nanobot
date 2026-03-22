@@ -31,6 +31,7 @@ services:
       - ~/LocalDev/hashi:/root/hashi
       - ~/LocalDev/hashi-worktrees:/root/hashi-worktrees
       - ./shared/prompts:/root/prompts:ro
+      - ./configs/nanobot-1/figma-mcp.json:/root/figma-mcp.json:ro
     expose:
       - "18790"
     deploy:
