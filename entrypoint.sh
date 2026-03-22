@@ -13,9 +13,10 @@ if [ -d /root/.claude ]; then
     chown -R claude:claude /home/claude/.claude /home/claude/.claude.json 2>/dev/null || true
 fi
 
-# Give claude user access to worktrees and hashi repo
-chown -R claude:claude /root/hashi-worktrees 2>/dev/null || true
-chmod -R a+rw /root/hashi 2>/dev/null || true
+# Give claude user access to worktrees and hashi repo (top-level only, not recursive)
+chown claude:claude /root/hashi-worktrees 2>/dev/null || true
+chmod a+rwx /root/hashi-worktrees 2>/dev/null || true
+chmod a+rwx /root/hashi 2>/dev/null || true
 
 # Make GH_TOKEN available to claude user
 echo "export GH_TOKEN=$GH_TOKEN" > /home/claude/.env 2>/dev/null || true
