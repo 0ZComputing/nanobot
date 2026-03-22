@@ -109,6 +109,8 @@ nanobot/
 │   ├── Caddyfile              # Routing + SSL config
 │   └── site/
 │       └── index.html         # Landing page (Spline logo)
+├── secrets/
+│   └── github-pat             # GitHub PAT for gh CLI (mounted :ro)
 ├── shared/
 │   ├── skills/                # Shared across all instances (read-only mount)
 │   └── webhooks/              # Shared webhook templates (github.md, etc.)
@@ -146,6 +148,7 @@ services:
 
 | Resource | Scope | Reason |
 |---|---|---|
+| `secrets/` | Shared | GitHub PAT and other secrets (mounted read-only) |
 | `skills/` | Shared | Same capabilities across all instances |
 | `webhooks/` | Shared | Same event handling templates |
 | `config.json` | Per-instance | Secrets, channels, model selection (mounted read-only) |
@@ -156,6 +159,46 @@ services:
 | `sessions/` | Per-instance | Isolated session history |
 | `cron/` | Per-instance | Different scheduled tasks |
 | `history/` | Per-instance | Isolated command history |
+
+## GitHub PAT (Personal Access Token)
+
+Bots use the `gh` CLI for GitHub operations (issues, PRs, cloning). Authentication is handled via a classic PAT stored as a Docker secret.
+
+### Token Setup
+
+1. Generate a **classic PAT** at [GitHub → Settings → Developer settings → Personal access tokens → Tokens (classic)](https://github.com/settings/tokens)
+2. Required scopes: **`repo`** (covers issues, PRs, cloning, API access)
+3. Optional scopes: `read:org` (only if querying org-level data), `workflow`, `write:packages`
+4. Save the token to `secrets/github-pat`
+
+### How It Works
+
+The `entrypoint.sh` loads the token into the environment before starting nanobot:
+
+```sh
+if [ -f /run/secrets/github-pat ]; then
+    export GH_TOKEN=$(cat /run/secrets/github-pat)
+fi
+```
+
+The secrets directory is mounted read-only into each container:
+
+```yaml
+volumes:
+  - ./secrets:/run/secrets:ro
+```
+
+The `gh` CLI automatically picks up `GH_TOKEN` from the environment — no `gh auth login` needed.
+
+### Verification
+
+To verify the token works inside a running container:
+
+```bash
+docker compose exec nanobot-1 sh -c 'export GH_TOKEN=$(cat /run/secrets/github-pat) && gh auth status'
+```
+
+> **Note:** `docker compose exec` bypasses the entrypoint, so you need to load the token manually for ad-hoc commands. The main nanobot process has it set automatically.
 
 ## Security
 
