@@ -307,6 +307,38 @@ class WebhookChannel(BaseChannel):
                 logger.debug("Webhook filtered: '{}' not in assignees {}", cfg.require_assignee, assignees)
                 return False
 
+        # GitHub projects_v2_item: only pass through actual status field changes
+        if event_type == "projects_v2_item":
+            if not self._is_project_status_change(payload):
+                return False
+
+        return True
+
+    @staticmethod
+    def _is_project_status_change(payload: dict) -> bool:
+        """Filter projects_v2_item events to only status field changes.
+
+        Drops: created, reordered, deleted, non-status field edits.
+        Passes: action=edited with a field change on a single_select field.
+        """
+        action = payload.get("action", "")
+        if action != "edited":
+            logger.debug("Webhook filtered: projects_v2_item action '{}' != 'edited'", action)
+            return False
+
+        changes = payload.get("changes", {})
+        field_value = changes.get("field_value", {})
+        field_type = field_value.get("field_type", "")
+        if field_type != "single_select":
+            logger.debug("Webhook filtered: projects_v2_item field_type '{}' != 'single_select'", field_type)
+            return False
+
+        field_name = field_value.get("field_name", "")
+        if field_name != "Status":
+            logger.debug("Webhook filtered: projects_v2_item field '{}' != 'Status'", field_name)
+            return False
+
+        logger.debug("Webhook passed: projects_v2_item status change detected")
         return True
 
     @staticmethod
