@@ -28,7 +28,10 @@ gh api graphql -f query='query($id:ID!){node(id:$id){...on ProjectV2Item{content
 | Ready for Dev | → **ready-for-dev** |
 | In Development | → **in-development** |
 
-All other statuses (Hold, Backlog, UI Prototyping, Review, Done): respond `"[#{NUMBER}](https://github.com/0ZComputing/hashi/issues/{NUMBER}) - noop"` — NO tool calls.
+| Review | → **review** |
+| Done | → **done** |
+
+All other statuses (Hold, Backlog, UI Prototyping): respond `"[#{NUMBER}](https://github.com/0ZComputing/hashi/issues/{NUMBER}) - noop"` — NO tool calls.
 
 ---
 
@@ -162,6 +165,65 @@ su -c 'source /home/claude/.env && cd /root/hashi-worktrees/issue-{NUMBER} && no
 ```
 
 **3.** Respond: `"[#{NUMBER}](https://github.com/0ZComputing/hashi/issues/{NUMBER}) - implementation started"`
+
+---
+
+## review
+
+Self-review with Claude, fix issues, update docs, then request human review.
+
+**1.** Find the PR:
+```bash
+gh pr list --repo 0ZComputing/hashi --head ai/issue-{NUMBER} --json number,url --jq '.[0]'
+```
+
+**2.** Spawn Claude CLI one-shot for self-review + fixes + docs update:
+```bash
+su -c 'source /home/claude/.env && cd /root/hashi-worktrees/issue-{NUMBER} && nohup claude -p --dangerously-skip-permissions --model opus -m "Review the PR diff for ai/issue-{NUMBER}. Fix any code quality issues, bugs, missing tests, or security concerns. Update any relevant docs. Commit and push all fixes. Then exit." > /tmp/claude-review-{NUMBER}.out 2>&1 &' claude
+```
+
+**3.** Request PR review and assign reviewers:
+```bash
+gh pr edit {PR_NUMBER} --repo 0ZComputing/hashi --add-reviewer 01Z 2>/dev/null || echo "reviewer added"
+```
+```bash
+gh issue edit {NUMBER} --repo 0ZComputing/hashi --remove-assignee sledcycle --add-assignee 01Z 2>/dev/null || echo "assigned"
+```
+
+**4.** Respond: `"[#{NUMBER}](https://github.com/0ZComputing/hashi/issues/{NUMBER}) - review started, PR assigned to 01Z"`
+
+---
+
+## done
+
+Cleanup worktree, deregister, check for unblocked dependents.
+
+**1.** Remove worktree:
+```bash
+git -C /root/hashi worktree remove /root/hashi-worktrees/issue-{NUMBER} --force 2>/dev/null || echo "no worktree"
+```
+
+**2.** Remove from active-tasks.json:
+```bash
+cat /root/.nanobot/workspace/active-tasks.json | jq --argjson n {NUMBER} '[.[] | select(.issue_number != $n)]' > /tmp/at.json && mv /tmp/at.json /root/.nanobot/workspace/active-tasks.json
+```
+
+**3.** Check for unblocked dependents:
+```bash
+gh api graphql -f query='query($n:Int!,$o:String!,$r:String!){repository(owner:$o,name:$r){issue(number:$n){trackedInIssues(first:50){nodes{number title state trackedIssues(first:20){nodes{number state}}}}}}}' -f o="0ZComputing" -f r="hashi" -F n={NUMBER}
+```
+
+For each issue that tracked this one: if ALL its tracked issues are CLOSED, check its project board status:
+```bash
+gh project item-list 9 --owner 0ZComputing --format json --limit 200 | jq '.items[] | select(.content.number == BLOCKED_NUMBER)'
+```
+
+If status is "Backlog" → move to "Ready for Dev":
+```bash
+gh api graphql -f query='mutation{updateProjectV2ItemFieldValue(input:{projectId:"PVT_kwDODgSGac4BPTGn",itemId:"BLOCKED_ITEM_ID",fieldId:"PVTSSF_lADODgSGac4BPTGnzg9vz6Y",value:{singleSelectOptionId:"4cc28e6c"}}){projectV2Item{id}}}'
+```
+
+**4.** Respond: `"[#{NUMBER}](https://github.com/0ZComputing/hashi/issues/{NUMBER}) - done, cleaned up"` — if any issues were unblocked, append: `"Unblocked: [#{BLOCKED}](https://github.com/0ZComputing/hashi/issues/{BLOCKED}) → Ready for Dev"`
 
 ---
 
