@@ -168,12 +168,12 @@ Check if any label is "UI" or if the title/body contains UI-related keywords (ui
 
 If NOT a UI issue:
 ```bash
-nohup claude -p --dangerously-skip-permissions --model opus < /tmp/claude-plan-{NUMBER}.md > /tmp/claude-plan-{NUMBER}.out 2>&1 &
+su -c 'source /home/claude/.env && nohup claude -p --dangerously-skip-permissions --model opus < /tmp/claude-plan-{NUMBER}.md > /tmp/claude-plan-{NUMBER}.out 2>&1 &' claude
 ```
 
 If UI issue — add `--mcp-config` to enable Figma MCP server:
 ```bash
-nohup claude -p --dangerously-skip-permissions --model opus --mcp-config /root/figma-mcp.json < /tmp/claude-plan-{NUMBER}.md > /tmp/claude-plan-{NUMBER}.out 2>&1 &
+su -c 'source /home/claude/.env && nohup claude -p --dangerously-skip-permissions --model opus --mcp-config /root/figma-mcp.json < /tmp/claude-plan-{NUMBER}.md > /tmp/claude-plan-{NUMBER}.out 2>&1 &' claude
 ```
 
 **Step 6: Respond with summary for Discord**
@@ -251,12 +251,12 @@ The worktree should already exist from the planning phase. Run the one-shot from
 
 If NOT a UI issue:
 ```bash
-cd /root/hashi-worktrees/issue-{NUMBER} && nohup claude -p --dangerously-skip-permissions --model opus < /tmp/claude-impl-{NUMBER}.md > /tmp/claude-impl-{NUMBER}.out 2>&1 &
+su -c 'source /home/claude/.env && cd /root/hashi-worktrees/issue-{NUMBER} && nohup claude -p --dangerously-skip-permissions --model opus < /tmp/claude-impl-{NUMBER}.md > /tmp/claude-impl-{NUMBER}.out 2>&1 &' claude
 ```
 
 If UI issue — add `--mcp-config` to enable Figma MCP server:
 ```bash
-cd /root/hashi-worktrees/issue-{NUMBER} && nohup claude -p --dangerously-skip-permissions --model opus --mcp-config /root/figma-mcp.json < /tmp/claude-impl-{NUMBER}.md > /tmp/claude-impl-{NUMBER}.out 2>&1 &
+su -c 'source /home/claude/.env && cd /root/hashi-worktrees/issue-{NUMBER} && nohup claude -p --dangerously-skip-permissions --model opus --mcp-config /root/figma-mcp.json < /tmp/claude-impl-{NUMBER}.md > /tmp/claude-impl-{NUMBER}.out 2>&1 &' claude
 ```
 
 **Step 5: Respond with summary for Discord**

@@ -42,6 +42,10 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | d
     apt-get install -y --no-install-recommends gh && \
     rm -rf /var/lib/apt/lists/*
 
+# Create non-root user for Claude CLI (refuses --dangerously-skip-permissions as root)
+RUN useradd -m -s /bin/sh claude && \
+    mkdir -p /home/claude/.claude /home/claude/.config/gh
+
 # Create config directory
 RUN mkdir -p /root/.nanobot
 
