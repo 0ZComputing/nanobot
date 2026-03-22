@@ -26,16 +26,18 @@ services:
       - ./configs/nanobot-1/config.json:/root/.nanobot/config.json:ro
       - ./shared/skills:/root/.nanobot/workspace/skills:ro
       - ./shared/webhooks:/root/.nanobot/workspace/webhooks:ro
+      - ~/.claude:/root/.claude:ro
+      - ./secrets:/run/secrets:ro
     expose:
       - "18790"
     deploy:
       resources:
         limits:
-          cpus: '1'
-          memory: 1G
+          cpus: '5'
+          memory: 12G
         reservations:
-          cpus: '0.25'
-          memory: 256M
+          cpus: '1'
+          memory: 2G
 
 volumes:
   caddy-data:
