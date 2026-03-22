@@ -26,8 +26,11 @@ services:
       - ./configs/nanobot-1/config.json:/root/.nanobot/config.json:ro
       - ./shared/skills:/root/.nanobot/workspace/skills:ro
       - ./shared/webhooks:/root/.nanobot/workspace/webhooks:ro
-      - ~/.claude:/root/.claude:ro
+      - ~/.claude:/root/.claude
       - ./secrets:/run/secrets:ro
+      - ~/LocalDev/hashi:/root/hashi
+      - ~/LocalDev/hashi-worktrees:/root/hashi-worktrees
+      - ./shared/prompts:/root/prompts:ro
     expose:
       - "18790"
     deploy:
