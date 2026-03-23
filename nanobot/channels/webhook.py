@@ -61,9 +61,11 @@ import fnmatch
 import hashlib
 import hmac
 import json
+import os
 from pathlib import Path
 from typing import Any
 
+import aiohttp
 from aiohttp import web
 from loguru import logger
 from pydantic import Field
@@ -89,6 +91,16 @@ class WebhookSourceConfig(Base):
     require_assignee: str = ""
     notify_channel: str = ""
     notify_chat_id: str = ""
+    # GitHub Projects v2 filters — code-level routing to avoid LLM calls
+    project_node_id: str = ""
+    actionable_statuses: list[str] = Field(default_factory=list)
+    notify_statuses: list[str] = Field(default_factory=list)
+
+    # Status name → workflow name mapping for structured context
+    status_workflows: dict[str, str] = Field(default_factory=dict)
+
+    # Sender filter — skip events triggered by these GitHub users (prevents self-trigger loops)
+    ignore_senders: list[str] = Field(default_factory=list)
 
 
 class WebhookConfig(Base):
@@ -151,6 +163,12 @@ class WebhookChannel(BaseChannel):
         if not notify:
             return
 
+        # Skip noisy noop responses — only forward actionable notifications
+        content_lower = (msg.content or "").lower()
+        if "noop" in content_lower:
+            logger.debug("Webhook send: skipping noop response")
+            return
+
         await self.bus.publish_outbound(OutboundMessage(
             channel=notify["channel"],
             chat_id=notify["chat_id"],
@@ -191,8 +209,19 @@ class WebhookChannel(BaseChannel):
         if not self._passes_filters(source_config, payload, request):
             return web.json_response({"status": "filtered"}, status=200)
 
-        # 5. Build context and publish
-        context = self._build_context(source, payload, request)
+        event_type = self._detect_event_type(payload, request)
+
+        # 5. Code-level enrichment and routing for projects_v2_item events
+        #    Avoids LLM calls for noops, wrong assignees, and notify-only statuses.
+        if event_type == "projects_v2_item":
+            return await self._handle_project_item(source, source_config, payload)
+
+        # 5b. Issues assigned event — check if issue has an actionable project status
+        if event_type == "issues" and payload.get("action") == "assigned":
+            return await self._handle_issue_assigned(source, source_config, payload)
+
+        # 6. Non-project events: build context and publish to LLM as before
+        context = self._build_context(source, payload, request, event_type=event_type)
         metadata: dict[str, Any] = {"_webhook_source": source}
 
         if source_config.notify_channel and source_config.notify_chat_id:
@@ -209,6 +238,272 @@ class WebhookChannel(BaseChannel):
         )
 
         return web.json_response({"status": "accepted"}, status=202)
+
+    async def _handle_project_item(
+        self, source: str, cfg: WebhookSourceConfig, payload: dict,
+    ) -> web.Response:
+        """Handle projects_v2_item events with code-level enrichment and routing.
+
+        1. Fetch issue details + status via GraphQL
+        2. Check assignee in code
+        3. Route by status: noop, notify-only, or LLM workflow
+        """
+        # Sender filter — skip events triggered by the bot's own PAT (prevents self-trigger loops)
+        sender = (payload.get("sender") or {}).get("login", "")
+        if cfg.ignore_senders and sender in cfg.ignore_senders:
+            logger.debug("Webhook filtered: sender '{}' in ignoreSenders", sender)
+            return web.json_response({"status": "filtered", "reason": "self-trigger"}, status=200)
+
+        # Enrich: fetch issue details and current status via GraphQL
+        enriched = await self._enrich_project_item(payload)
+        if enriched is None:
+            logger.debug("Webhook filtered: projects_v2_item enrichment failed")
+            return web.json_response({"status": "filtered", "reason": "enrichment failed"}, status=200)
+
+        status_name = enriched["status_name"]
+        issue_number = enriched["issue_number"]
+        issue_title = enriched["issue_title"]
+        assignees = enriched["assignees"]
+
+        # Assignee check — only process issues assigned to the configured user.
+        # If assignee was just changed (race condition), the issues/assigned handler
+        # will catch it when the new assignee event arrives.
+        if cfg.require_assignee and cfg.require_assignee not in assignees:
+            logger.debug("Webhook filtered: '{}' not in issue #{} assignees {}", cfg.require_assignee, issue_number, assignees)
+            return web.json_response({"status": "filtered", "reason": "assignee"}, status=200)
+
+        # Notify-only statuses — send a simple Discord message, no LLM needed
+        if cfg.notify_statuses and status_name in cfg.notify_statuses:
+            logger.info("Webhook notify-only: issue #{} '{}' → {}", issue_number, issue_title, status_name)
+            if cfg.notify_channel and cfg.notify_chat_id:
+                await self.bus.publish_outbound(OutboundMessage(
+                    channel=cfg.notify_channel,
+                    chat_id=cfg.notify_chat_id,
+                    content=f"Issue #{issue_number}: {issue_title} → **{status_name}**",
+                ))
+            return web.json_response({"status": "notified", "issue": issue_number, "status_name": status_name}, status=200)
+
+        # Actionable statuses — only these go to the LLM
+        if cfg.actionable_statuses and status_name not in cfg.actionable_statuses:
+            logger.debug("Webhook filtered: status '{}' not actionable for issue #{}", status_name, issue_number)
+            return web.json_response({"status": "filtered", "reason": "noop status"}, status=200)
+
+        # Resolve workflow name from config mapping
+        workflow = cfg.status_workflows.get(status_name, "")
+
+        # Build structured context for the LLM — no raw payload
+        context = self._build_project_context(source, enriched, workflow)
+        metadata: dict[str, Any] = {
+            "_webhook_source": source,
+            "_enriched": enriched,
+        }
+
+        if cfg.notify_channel and cfg.notify_chat_id:
+            metadata["_webhook_notify"] = {
+                "channel": cfg.notify_channel,
+                "chat_id": cfg.notify_chat_id,
+            }
+
+        logger.info("Webhook → LLM: issue #{} '{}' status={} workflow={}", issue_number, issue_title, status_name, workflow)
+
+        await self._handle_message(
+            sender_id=source,
+            chat_id=f"webhook:{source}",
+            content=context,
+            metadata=metadata,
+        )
+
+        # Chain: ready-for-planning moves status to "In Planning", but the resulting
+        # webhook is dropped by ignoreSenders (bot's own PAT).  Fire in-planning
+        # automatically so the planning agent actually spawns.
+        chain_workflow = cfg.status_workflows.get({
+            "ready-for-planning": "In Planning",
+            "ready-for-dev": "In Development",
+        }.get(workflow, ""), "")
+        if chain_workflow:
+            enriched_next = {**enriched, "status_name": {
+                "ready-for-planning": "In Planning",
+                "ready-for-dev": "In Development",
+            }[workflow]}
+            chain_context = self._build_project_context(source, enriched_next, chain_workflow)
+            chain_meta: dict[str, Any] = {
+                "_webhook_source": source,
+                "_enriched": enriched_next,
+            }
+            if cfg.notify_channel and cfg.notify_chat_id:
+                chain_meta["_webhook_notify"] = {
+                    "channel": cfg.notify_channel,
+                    "chat_id": cfg.notify_chat_id,
+                }
+            logger.info("Webhook chain: {} → {} for issue #{}", workflow, chain_workflow, issue_number)
+            await self._handle_message(
+                sender_id=source,
+                chat_id=f"webhook:{source}",
+                content=chain_context,
+                metadata=chain_meta,
+            )
+
+        return web.json_response({"status": "accepted", "issue": issue_number, "workflow": workflow}, status=202)
+
+    async def _handle_issue_assigned(
+        self, source: str, cfg: WebhookSourceConfig, payload: dict,
+    ) -> web.Response:
+        """Handle issues assigned events — trigger workflow if issue has an actionable project status.
+
+        Covers the race condition where a status change and assignee change happen
+        near-simultaneously. The status change event may see the old assignee, so
+        this handler catches the assignment and checks if the issue needs processing.
+        """
+        assignee = (payload.get("assignee") or {}).get("login", "")
+        if cfg.require_assignee and assignee != cfg.require_assignee:
+            logger.debug("Webhook filtered: assigned '{}' != required '{}'", assignee, cfg.require_assignee)
+            return web.json_response({"status": "filtered", "reason": "wrong assignee"}, status=200)
+
+        issue = payload.get("issue") or {}
+        issue_number = issue.get("number")
+        if not issue_number:
+            return web.json_response({"status": "filtered", "reason": "no issue number"}, status=200)
+
+        # Look up this issue's project board status
+        repo = (payload.get("repository") or {}).get("full_name", "")
+        owner, repo_name = repo.split("/", 1) if "/" in repo else ("", "")
+        enriched = await self._enrich_issue_project_status(issue_number, cfg, owner, repo_name)
+        if enriched is None:
+            logger.debug("Webhook filtered: issue #{} not on project board or enrichment failed", issue_number)
+            return web.json_response({"status": "filtered", "reason": "not on board"}, status=200)
+
+        status_name = enriched["status_name"]
+        issue_title = enriched["issue_title"]
+
+        # Only trigger for actionable statuses
+        if cfg.actionable_statuses and status_name not in cfg.actionable_statuses:
+            logger.debug("Webhook filtered: issue #{} status '{}' not actionable (assigned event)", issue_number, status_name)
+            return web.json_response({"status": "filtered", "reason": "noop status"}, status=200)
+
+        workflow = cfg.status_workflows.get(status_name, "")
+
+        # Build structured context and send to LLM
+        context = self._build_project_context(source, enriched, workflow)
+        metadata: dict[str, Any] = {
+            "_webhook_source": source,
+            "_enriched": enriched,
+        }
+
+        if cfg.notify_channel and cfg.notify_chat_id:
+            metadata["_webhook_notify"] = {
+                "channel": cfg.notify_channel,
+                "chat_id": cfg.notify_chat_id,
+            }
+
+        logger.info("Webhook → LLM (assigned): issue #{} '{}' status={} workflow={}", issue_number, issue_title, status_name, workflow)
+
+        await self._handle_message(
+            sender_id=source,
+            chat_id=f"webhook:{source}",
+            content=context,
+            metadata=metadata,
+        )
+
+        return web.json_response({"status": "accepted", "issue": issue_number, "workflow": workflow}, status=202)
+
+    _ISSUE_PROJECT_QUERY = """
+    query($owner: String!, $repo: String!, $number: Int!) {
+      repository(owner: $owner, name: $repo) {
+        issue(number: $number) {
+          title
+          body
+          labels(first: 10) { nodes { name } }
+          projectItems(first: 10) {
+            nodes {
+              id
+              project { id }
+              fieldValueByName(name: "Status") {
+                ... on ProjectV2ItemFieldSingleSelectValue { name }
+              }
+            }
+          }
+        }
+      }
+    }
+    """.strip()
+
+    async def _enrich_issue_project_status(
+        self, issue_number: int, cfg: WebhookSourceConfig,
+        owner: str = "", repo: str = "",
+    ) -> dict[str, Any] | None:
+        """Look up an issue's project board status by issue number.
+
+        Returns enriched dict compatible with _build_project_context, or None
+        if the issue is not on the configured project board.
+        """
+        gh_token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN", "")
+        if not gh_token:
+            return None
+
+        # Extract owner/repo from the project — we need to know the repo
+        # For now, this is hardcoded to match the project board context.
+        # The repo info comes from the webhook payload's repository field,
+        # but we use the config's project_node_id to match the right project item.
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                resp = await session.post(
+                    "https://api.github.com/graphql",
+                    json={
+                        "query": self._ISSUE_PROJECT_QUERY,
+                        "variables": {
+                            "owner": owner,
+                            "repo": repo,
+                            "number": issue_number,
+                        },
+                    },
+                    headers={
+                        "Authorization": f"Bearer {gh_token}",
+                        "Accept": "application/json",
+                    },
+                    timeout=aiohttp.ClientTimeout(total=15),
+                )
+                if resp.status != 200:
+                    return None
+                data = await resp.json()
+        except Exception as e:
+            logger.warning("Webhook: issue project status query error: {}", e)
+            return None
+
+        if data.get("errors"):
+            logger.warning("Webhook: issue project status query errors: {}", data["errors"])
+
+        issue_data = ((data.get("data") or {}).get("repository") or {}).get("issue") or {}
+        if not issue_data:
+            return None
+
+        # Find the project item matching our configured project
+        project_items = (issue_data.get("projectItems") or {}).get("nodes", [])
+        item_node_id = ""
+        status_name = ""
+        for item in project_items:
+            project = item.get("project") or {}
+            if cfg.project_node_id and project.get("id") != cfg.project_node_id:
+                continue
+            item_node_id = item.get("id", "")
+            status_field = item.get("fieldValueByName") or {}
+            status_name = status_field.get("name", "")
+            break
+
+        if not item_node_id:
+            return None
+
+        labels = {n.get("name") for n in (issue_data.get("labels") or {}).get("nodes", []) if n.get("name")}
+
+        return {
+            "item_node_id": item_node_id,
+            "issue_number": issue_number,
+            "issue_title": issue_data.get("title", ""),
+            "issue_body": issue_data.get("body", ""),
+            "assignees": set(),  # Not needed — we already validated the assignee from the payload
+            "labels": labels,
+            "status_name": status_name,
+        }
 
     # ------------------------------------------------------------------
     # Signature verification
@@ -300,8 +595,9 @@ class WebhookChannel(BaseChannel):
                 logger.debug("Webhook filtered: labels {} in ignoreLabels", labels)
                 return False
 
-        # Assignee filter
-        if cfg.require_assignee:
+        # Assignee filter — skip for issues/assigned events (payload shows pre-assignment state;
+        # the _handle_issue_assigned handler checks the new assignee from payload.assignee instead)
+        if cfg.require_assignee and not (event_type == "issues" and payload.get("action") == "assigned"):
             assignees = self._extract_assignees(payload)
             if assignees is not None and cfg.require_assignee not in assignees:
                 logger.debug("Webhook filtered: '{}' not in assignees {}", cfg.require_assignee, assignees)
@@ -309,22 +605,29 @@ class WebhookChannel(BaseChannel):
 
         # GitHub projects_v2_item: only pass through actual status field changes
         if event_type == "projects_v2_item":
-            if not self._is_project_status_change(payload):
+            if not self._is_project_status_change(payload, cfg):
                 return False
 
         return True
 
     @staticmethod
-    def _is_project_status_change(payload: dict) -> bool:
+    def _is_project_status_change(payload: dict, cfg: WebhookSourceConfig) -> bool:
         """Filter projects_v2_item events to only status field changes.
 
-        Drops: created, reordered, deleted, non-status field edits.
-        Passes: action=edited with a field change on a single_select field.
+        Drops: created, reordered, deleted, non-status field edits, wrong project.
+        Passes: action=edited with a Status field change on the configured project.
         """
         action = payload.get("action", "")
         if action != "edited":
             logger.debug("Webhook filtered: projects_v2_item action '{}' != 'edited'", action)
             return False
+
+        # Project node ID filter — skip events from other projects
+        if cfg.project_node_id:
+            item_project = (payload.get("projects_v2_item") or {}).get("project_node_id", "")
+            if item_project != cfg.project_node_id:
+                logger.debug("Webhook filtered: project '{}' != configured '{}'", item_project, cfg.project_node_id)
+                return False
 
         changes = payload.get("changes", {})
         field_value = changes.get("field_value", {})
@@ -340,6 +643,91 @@ class WebhookChannel(BaseChannel):
 
         logger.debug("Webhook passed: projects_v2_item status change detected")
         return True
+
+    _ENRICH_QUERY = """
+    query($id: ID!) {
+      node(id: $id) {
+        ... on ProjectV2Item {
+          id
+          content {
+            ... on Issue {
+              number
+              title
+              body
+              assignees(first: 10) { nodes { login } }
+              labels(first: 10) { nodes { name } }
+            }
+          }
+          fieldValueByName(name: "Status") {
+            ... on ProjectV2ItemFieldSingleSelectValue { name }
+          }
+        }
+      }
+    }
+    """.strip()
+
+    async def _enrich_project_item(self, payload: dict) -> dict[str, Any] | None:
+        """Fetch issue details and status via GitHub GraphQL for a projects_v2_item event.
+
+        Returns a dict with issue_number, issue_title, issue_body, assignees,
+        labels, status_name, item_node_id — or None if the API call fails.
+        """
+        item = payload.get("projects_v2_item") or {}
+        item_node_id = item.get("node_id", "")
+        if not item_node_id:
+            logger.warning("Webhook: projects_v2_item missing node_id")
+            return None
+
+        gh_token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN", "")
+        if not gh_token:
+            logger.warning("Webhook: no GH_TOKEN/GITHUB_TOKEN for GraphQL enrichment")
+            return None
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                resp = await session.post(
+                    "https://api.github.com/graphql",
+                    json={"query": self._ENRICH_QUERY, "variables": {"id": item_node_id}},
+                    headers={
+                        "Authorization": f"Bearer {gh_token}",
+                        "Accept": "application/json",
+                    },
+                    timeout=aiohttp.ClientTimeout(total=15),
+                )
+                if resp.status != 200:
+                    body = await resp.text()
+                    logger.warning("Webhook: GraphQL enrichment failed ({}): {}", resp.status, body[:200])
+                    return None
+                data = await resp.json()
+        except Exception as e:
+            logger.warning("Webhook: GraphQL enrichment error: {}", e)
+            return None
+
+        # GitHub GraphQL can return 200 with errors (permissions, rate limits, invalid IDs)
+        if data.get("errors"):
+            logger.warning("Webhook: GraphQL enrichment errors: {}", data["errors"])
+
+        node = (data.get("data") or {}).get("node") or {}
+        content = node.get("content") or {}
+        status_field = node.get("fieldValueByName") or {}
+
+        issue_number = content.get("number")
+        if not issue_number:
+            logger.debug("Webhook: enrichment returned no issue number (item may not be an issue)")
+            return None
+
+        assignees = {n.get("login") for n in (content.get("assignees") or {}).get("nodes", []) if n.get("login")}
+        labels = {n.get("name") for n in (content.get("labels") or {}).get("nodes", []) if n.get("name")}
+
+        return {
+            "item_node_id": item_node_id,
+            "issue_number": issue_number,
+            "issue_title": content.get("title", ""),
+            "issue_body": content.get("body", ""),
+            "assignees": assignees,
+            "labels": labels,
+            "status_name": status_field.get("name", ""),
+        }
 
     @staticmethod
     def _detect_event_type(payload: dict, request: web.Request) -> str:
@@ -412,16 +800,52 @@ class WebhookChannel(BaseChannel):
 
     def _build_context(
         self, source: str, payload: dict, request: web.Request,
+        *, event_type: str = "",
     ) -> str:
         """Combine source instructions from workspace with the webhook payload."""
         instructions = self._load_instructions(source)
-        event_type = self._detect_event_type(payload, request)
+        if not event_type:
+            event_type = self._detect_event_type(payload, request)
 
         parts = []
         if instructions:
             parts.append(instructions)
         parts.append(f"## Webhook Event\n\n**Source:** {source}\n**Event:** {event_type}")
         parts.append(f"```json\n{json.dumps(payload, indent=2, default=str)}\n```")
+
+        return "\n\n---\n\n".join(parts)
+
+    def _build_project_context(
+        self, source: str, enriched: dict[str, Any], workflow: str,
+    ) -> str:
+        """Build structured context for a projects_v2_item event.
+
+        Instead of sending the raw payload, sends pre-fetched issue details
+        and the resolved workflow name so the LLM can skip straight to execution.
+        """
+        instructions = self._load_instructions(source)
+        labels_str = ", ".join(sorted(enriched["labels"])) if enriched["labels"] else "none"
+
+        parts = []
+        if instructions:
+            parts.append(instructions)
+
+        parts.append(
+            f"## Webhook Event\n\n"
+            f"**Source:** {source}\n"
+            f"**Event:** projects_v2_item\n"
+            f"**Status:** {enriched['status_name']}\n"
+            f"**Workflow:** {workflow}"
+        )
+
+        parts.append(
+            f"## Issue Details\n\n"
+            f"- **Number:** {enriched['issue_number']}\n"
+            f"- **Title:** {enriched['issue_title']}\n"
+            f"- **Labels:** {labels_str}\n"
+            f"- **Item Node ID:** {enriched['item_node_id']}\n\n"
+            f"### Body\n\n{enriched['issue_body'] or '(empty)'}"
+        )
 
         return "\n\n---\n\n".join(parts)
 
