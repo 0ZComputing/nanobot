@@ -71,12 +71,26 @@ sed "s#{N}#{NUMBER}#g" /root/prompts/planning-revision-agent.md | sed "s#{TITLE}
 
 Non-UI:
 ```bash
-tmux new-session -d -s claude-{NUMBER}-plan "su -c 'source /home/claude/.env && cd /root/hashi-worktrees/issue-{NUMBER} && claude -p --dangerously-skip-permissions --model opus < /tmp/claude-plan-{NUMBER}.md > /tmp/claude-plan-{NUMBER}.out 2>&1' claude"
+cat > /tmp/run-claude-{NUMBER}.sh << 'SCRIPT'
+#!/bin/bash
+source /home/claude/.env
+cd /root/hashi-worktrees/issue-{NUMBER}
+claude -p --dangerously-skip-permissions --model opus < /tmp/claude-plan-{NUMBER}.md > /tmp/claude-plan-{NUMBER}.out 2>&1
+SCRIPT
+chmod +x /tmp/run-claude-{NUMBER}.sh
+tmux new-session -d -s claude-{NUMBER}-plan "su -c 'bash /tmp/run-claude-{NUMBER}.sh' claude"
 ```
 
 UI:
 ```bash
-tmux new-session -d -s claude-{NUMBER}-plan "su -c 'source /home/claude/.env && cd /root/hashi-worktrees/issue-{NUMBER} && claude -p --dangerously-skip-permissions --model opus --mcp-config /root/figma-mcp.json < /tmp/claude-plan-{NUMBER}.md > /tmp/claude-plan-{NUMBER}.out 2>&1' claude"
+cat > /tmp/run-claude-{NUMBER}.sh << 'SCRIPT'
+#!/bin/bash
+source /home/claude/.env
+cd /root/hashi-worktrees/issue-{NUMBER}
+claude -p --dangerously-skip-permissions --model opus --mcp-config /root/figma-mcp.json < /tmp/claude-plan-{NUMBER}.md > /tmp/claude-plan-{NUMBER}.out 2>&1
+SCRIPT
+chmod +x /tmp/run-claude-{NUMBER}.sh
+tmux new-session -d -s claude-{NUMBER}-plan "su -c 'bash /tmp/run-claude-{NUMBER}.sh' claude"
 ```
 
 **3.** Respond: `"[#{NUMBER}](https://github.com/0ZComputing/hashi/issues/{NUMBER}) - planning started"`
@@ -138,12 +152,26 @@ sed "s#{N}#{NUMBER}#g" /root/prompts/impl-agent.md | sed "s#{TITLE}#ESCAPED_TITL
 
 Non-UI:
 ```bash
-tmux new-session -d -s claude-{NUMBER}-impl "su -c 'source /home/claude/.env && cd /root/hashi-worktrees/issue-{NUMBER} && claude -p --dangerously-skip-permissions --model opus < /tmp/claude-impl-{NUMBER}.md > /tmp/claude-impl-{NUMBER}.out 2>&1' claude"
+cat > /tmp/run-claude-{NUMBER}.sh << 'SCRIPT'
+#!/bin/bash
+source /home/claude/.env
+cd /root/hashi-worktrees/issue-{NUMBER}
+claude -p --dangerously-skip-permissions --model opus < /tmp/claude-impl-{NUMBER}.md > /tmp/claude-impl-{NUMBER}.out 2>&1
+SCRIPT
+chmod +x /tmp/run-claude-{NUMBER}.sh
+tmux new-session -d -s claude-{NUMBER}-impl "su -c 'bash /tmp/run-claude-{NUMBER}.sh' claude"
 ```
 
 UI:
 ```bash
-tmux new-session -d -s claude-{NUMBER}-impl "su -c 'source /home/claude/.env && cd /root/hashi-worktrees/issue-{NUMBER} && claude -p --dangerously-skip-permissions --model opus --mcp-config /root/figma-mcp.json < /tmp/claude-impl-{NUMBER}.md > /tmp/claude-impl-{NUMBER}.out 2>&1' claude"
+cat > /tmp/run-claude-{NUMBER}.sh << 'SCRIPT'
+#!/bin/bash
+source /home/claude/.env
+cd /root/hashi-worktrees/issue-{NUMBER}
+claude -p --dangerously-skip-permissions --model opus --mcp-config /root/figma-mcp.json < /tmp/claude-impl-{NUMBER}.md > /tmp/claude-impl-{NUMBER}.out 2>&1
+SCRIPT
+chmod +x /tmp/run-claude-{NUMBER}.sh
+tmux new-session -d -s claude-{NUMBER}-impl "su -c 'bash /tmp/run-claude-{NUMBER}.sh' claude"
 ```
 
 **3.** Respond: `"[#{NUMBER}](https://github.com/0ZComputing/hashi/issues/{NUMBER}) - implementation started"`
@@ -173,12 +201,26 @@ cat /root/.nanobot/workspace/active-tasks.json | jq --argjson n {NUMBER} --arg t
 
 Non-UI:
 ```bash
-tmux new-session -d -s claude-{NUMBER}-review "su -c 'source /home/claude/.env && cd /root/hashi-worktrees/issue-{NUMBER} && claude -p --dangerously-skip-permissions --model opus < /tmp/claude-review-{NUMBER}.md > /tmp/claude-review-{NUMBER}.out 2>&1' claude"
+cat > /tmp/run-claude-{NUMBER}.sh << 'SCRIPT'
+#!/bin/bash
+source /home/claude/.env
+cd /root/hashi-worktrees/issue-{NUMBER}
+claude -p --dangerously-skip-permissions --model opus < /tmp/claude-review-{NUMBER}.md > /tmp/claude-review-{NUMBER}.out 2>&1
+SCRIPT
+chmod +x /tmp/run-claude-{NUMBER}.sh
+tmux new-session -d -s claude-{NUMBER}-review "su -c 'bash /tmp/run-claude-{NUMBER}.sh' claude"
 ```
 
 UI:
 ```bash
-tmux new-session -d -s claude-{NUMBER}-review "su -c 'source /home/claude/.env && cd /root/hashi-worktrees/issue-{NUMBER} && claude -p --dangerously-skip-permissions --model opus --mcp-config /root/figma-mcp.json < /tmp/claude-review-{NUMBER}.md > /tmp/claude-review-{NUMBER}.out 2>&1' claude"
+cat > /tmp/run-claude-{NUMBER}.sh << 'SCRIPT'
+#!/bin/bash
+source /home/claude/.env
+cd /root/hashi-worktrees/issue-{NUMBER}
+claude -p --dangerously-skip-permissions --model opus --mcp-config /root/figma-mcp.json < /tmp/claude-review-{NUMBER}.md > /tmp/claude-review-{NUMBER}.out 2>&1
+SCRIPT
+chmod +x /tmp/run-claude-{NUMBER}.sh
+tmux new-session -d -s claude-{NUMBER}-review "su -c 'bash /tmp/run-claude-{NUMBER}.sh' claude"
 ```
 
 **5.** Respond: `"[#{NUMBER}](https://github.com/0ZComputing/hashi/issues/{NUMBER}) - code review started"`
